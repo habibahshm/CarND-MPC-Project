@@ -4,6 +4,9 @@
 #include <iostream>
 #include <thread>
 #include <vector>
+#include <cppad/cppad.hpp>
+#include <cppad/ipopt/solve.hpp>
+
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "MPC.h"
@@ -11,12 +14,12 @@
 
 // for convenience
 using json = nlohmann::json;
-
+using CppAD::AD;
 // For converting back and forth between radians and degrees.
 constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
 double rad2deg(double x) { return x * 180 / pi(); }
-
+const double Lf = 2.67;
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
 // else the empty string "" will be returned.
@@ -71,6 +74,40 @@ int main() {
   // MPC is initialized here!
   MPC mpc;
 
+  //RUBRIC
+
+  // The Model
+
+  // The state of the car is represented by x,y,v,psi,cte and epsi which are the x position,
+  // y position, velocity, the angle between the heading of the car and the fitted poly, the
+  // cross track error and the error in the angle respectively.
+  // The acutators are the acceleration of the car and the steering value.
+  // The update euations are the kinematics equations of motion.
+
+  // Timestep Length and Elapsed Duration (N & dt)
+
+  // N is the number of time steps while dt is the time between acutatations, multiplied
+  // together they give the prediction horizon which is the duration over which future
+  // predictions are made.
+  // T should be as large as possible, while dt should be as small as possible. However,
+  // when I tried to put a big value for N the solver became very slow and the car crashed.
+  // Previous tested values for N where 50 and 30, but 10 gave the best results.
+
+  // Polynomial Fitting and MPC Preprocessing
+
+  // The only preprocessing done here is transforming the x and y waypoints to the car
+  // coordinates through translation and rotation before fitting a polynomial on them which
+  // made computing the predictions easier.
+
+  // Model Predictive Control with Latency
+
+  // Latency was handeled by predicting what will the state of the car be after the time given by
+  // the latency and then passing this new state to the solver of the MPC to work with
+  // as this state will be the actual state of the car at the time the acutators are 
+  // applied.  
+
+
+
   h.onMessage([&mpc](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
@@ -98,28 +135,75 @@ int main() {
           * Both are in between [-1, 1].
           *
           */
-          double steer_value;
-          double throttle_value;
+
+          // transform waypoints to be from car's perspective
+          // this means we can consider px = 0, py = 0, and psi = 0
+          // greatly simplifying future calculations
+          for (int i = 0; i < ptsx.size(); i++) {
+            double dx = ptsx[i] - px;
+            double dy = ptsy[i] - py;
+            ptsx[i] = dx * cos(-psi) - dy * sin(-psi);
+            ptsy[i] = dx * sin(-psi) + dy * cos(-psi);
+          }
+
+          double* ptrx = &ptsx[0];
+          double* ptry = &ptsy[0];
+          Eigen::Map<Eigen::VectorXd> ptsx_new(ptrx, 6);
+          Eigen::Map<Eigen::VectorXd> ptsy_new(ptry, 6);
+
+          auto coeffs = polyfit(ptsx_new,ptsy_new,3);
+          double cte = polyeval(coeffs,0);
+          double epsi = -atan(coeffs[1]);
+
+          double steer_value = j[1]["steering_angle"] ;
+          double throttle_value = j[1]["throttle"];
+          
+          double x_delayed = 0 + ( v * cos(0) * 0.1 );
+          double y_delayed = 0 + ( v * sin(0) * 0.1 );
+          double psi_delayed = 0 - ( v * steer_value / Lf *0.1 );
+          double v_delayed = v + throttle_value * 0.1;
+          double cte_delayed = cte + ( v * sin(epsi) * 0.1 );
+          double epsi_delayed = epsi - ( v * steer_value  / Lf *0.1);  
+
+          Eigen::VectorXd state(6);
+          state << x_delayed,y_delayed,psi_delayed,v_delayed,cte_delayed,epsi_delayed;
+
+ 
+          auto results = mpc.Solve(state,coeffs);
+
+          steer_value = results[0];
+          throttle_value = results[1];
+
+          std::vector<double>next_x_vals ; 
+          std::vector<double>next_y_vals ; 
+          std::vector<double>mpc_x_vals ; 
+          std::vector<double>mpc_y_vals ; 
+         
+          for(int i = 2; i < results.size();i++){
+            if( i % 2 == 0)
+              mpc_x_vals.push_back(results[i]);
+            else
+              mpc_y_vals.push_back(results[i]);
+          }
+ 
+          for(int i =0; i < 50 ; i+=2){
+             next_x_vals.push_back(i);
+             next_y_vals.push_back(polyeval(coeffs,i)) ; 
+          }
+
+
 
           json msgJson;
           // NOTE: Remember to divide by deg2rad(25) before you send the steering value back.
           // Otherwise the values will be in between [-deg2rad(25), deg2rad(25] instead of [-1, 1].
-          msgJson["steering_angle"] = steer_value;
+          msgJson["steering_angle"] = steer_value/(deg2rad(25));
           msgJson["throttle"] = throttle_value;
-
-          //Display the MPC predicted trajectory 
-          vector<double> mpc_x_vals;
-          vector<double> mpc_y_vals;
 
           //.. add (x,y) points to list here, points are in reference to the vehicle's coordinate system
           // the points in the simulator are connected by a Green line
 
           msgJson["mpc_x"] = mpc_x_vals;
           msgJson["mpc_y"] = mpc_y_vals;
-
-          //Display the waypoints/reference line
-          vector<double> next_x_vals;
-          vector<double> next_y_vals;
 
           //.. add (x,y) points to list here, points are in reference to the vehicle's coordinate system
           // the points in the simulator are connected by a Yellow line
